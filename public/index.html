@@ -61,21 +61,23 @@
     button:hover { background: #2c4b36; }
     button:disabled { opacity: .55; cursor: not-allowed; }
 
-    .key-buttons { display: flex; gap: 8px; }
-    .key-buttons button { flex: 1; }
-
-    .warning, #join-status {
-      font-size: 13px;
+    .note, #join-status, #status {
+      font-size: 14px;
       line-height: 1.5;
       color: #62685e;
     }
 
     #join-status { color: #9b3e31; }
     #chat { flex: 1; margin-top: 16px; min-height: 300px; }
-    #status { color: #62685e; font-size: 14px; }
+    #verification {
+      padding: 12px;
+      background: #f2f3ee;
+      border-radius: 10px;
+      overflow-wrap: anywhere;
+    }
 
     #messages {
-      height: min(52vh, 440px);
+      height: min(45vh, 400px);
       overflow-y: auto;
       padding: 0;
       list-style: none;
@@ -87,12 +89,25 @@
     #send-form { display: flex; gap: 8px; }
     #send-form input { flex: 1; min-width: 0; }
     #send-form button { width: auto; margin: 0; }
+
+    .verify-check {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin: 12px 0;
+      font-weight: 400;
+    }
+
+    .verify-check input {
+      width: auto;
+      margin-top: 4px;
+    }
   </style>
 </head>
 <body>
   <main>
     <h1>Cairn</h1>
-    <p class="subtitle">Messages encrypted in your browser.</p>
+    <p class="subtitle">A two-person encrypted chat demo.</p>
 
     <section class="panel" id="join-panel">
       <label for="name">Your display name</label>
@@ -101,33 +116,36 @@
 
       <label for="room">Room code</label>
       <input id="room" maxlength="40" placeholder="e.g. weekend-chat"
-             autocomplete="off" autocapitalize="none">
+             autocomplete="off" autocapitalize="none" spellcheck="false">
 
-      <label for="room-key">Room encryption key</label>
-      <input id="room-key" maxlength="64" placeholder="Generate a key or paste one"
-             autocomplete="off" autocapitalize="off" spellcheck="false">
-
-      <div class="key-buttons">
-        <button id="generate-key" type="button">Generate key</button>
-        <button id="copy-key" type="button">Copy key</button>
-      </div>
-
-      <p class="warning">
-        Everyone in the room needs the same key. Share it privately, not in the chat.
-        Anyone with the key can read the messages.
+      <p class="note">
+        Both people enter the same room code. There is no shared encryption key
+        to type in. After joining, compare the verification code using a separate
+        trusted channel, such as a phone call.
       </p>
-      <p id="join-status" aria-live="polite"></p>
 
+      <p id="join-status" aria-live="polite"></p>
       <button id="join-button" type="button">Join room</button>
     </section>
 
     <section id="chat" hidden>
-      <p id="status">Connecting…</p>
+      <p id="status" aria-live="polite">Connecting…</p>
+
+      <div id="verification-area" hidden>
+        <p><strong>Compare this code with the other person:</strong></p>
+        <p id="verification" aria-live="polite"></p>
+        <label class="verify-check">
+          <input id="verified" type="checkbox">
+          <span>We compared the codes over a separate trusted channel, and they match.</span>
+        </label>
+      </div>
+
       <ul id="messages" aria-live="polite"></ul>
+
       <form id="send-form">
         <input id="message-input" maxlength="1000" placeholder="Write a message"
-               autocomplete="off" aria-label="Message">
-        <button id="send-button" type="submit">Send</button>
+               autocomplete="off" aria-label="Message" disabled>
+        <button id="send-button" type="submit" disabled>Send</button>
       </form>
     </section>
   </main>
@@ -137,20 +155,29 @@
     const socket = io();
 
     const joinPanel = document.querySelector("#join-panel");
+    const joinStatus = document.querySelector("#join-status");
     const chat = document.querySelector("#chat");
     const status = document.querySelector("#status");
-    const joinStatus = document.querySelector("#join-status");
+    const verificationArea = document.querySelector("#verification-area");
+    const verification = document.querySelector("#verification");
+    const verifiedCheckbox = document.querySelector("#verified");
     const messages = document.querySelector("#messages");
-    const roomKeyInput = document.querySelector("#room-key");
     const messageInput = document.querySelector("#message-input");
+    const sendButton = document.querySelector("#send-button");
 
-    let cryptoKey;
-    let currentRoom;
-    let currentName;
+    let room = "";
+    let displayName = "";
+    let privateKey = null;
+    let ownPublicKeyText = "";
+    let peerPublicKeyText = "";
+    let sessionKey = null;
 
     function bytesToBase64Url(bytes) {
       let binary = "";
-      for (const byte of bytes) binary += String.fromCharCode(byte);
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+
       return btoa(binary)
         .replace(/\+/g, "-")
         .replace(/\//g, "_")
@@ -160,63 +187,16 @@
     function base64UrlToBytes(value) {
       const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
       const padded = base64 + "=".repeat((4 - base64.length % 4) % 4);
-      return Uint8Array.from(atob(padded), char => char.charCodeAt(0));
+      return Uint8Array.from(atob(padded), character => character.charCodeAt(0));
     }
 
-    async function importRoomKey(hex) {
-      if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
-        throw new Error("Generate a key, or enter the full 64-character key.");
-      }
-
-      const rawKey = new Uint8Array(32);
-      for (let i = 0; i < 32; i++) {
-        rawKey[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-      }
-
-      return crypto.subtle.importKey(
-        "raw",
-        rawKey,
-        { name: "AES-GCM" },
-        false,
-        ["encrypt", "decrypt"]
-      );
+    function updateSendControls() {
+      const canSend = Boolean(sessionKey && verifiedCheckbox.checked);
+      messageInput.disabled = !canSend;
+      sendButton.disabled = !canSend;
     }
 
-    async function encryptMessage(message) {
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const plaintext = new TextEncoder().encode(JSON.stringify(message));
-
-      const encrypted = await crypto.subtle.encrypt(
-        {
-          name: "AES-GCM",
-          iv,
-          additionalData: new TextEncoder().encode(currentRoom)
-        },
-        cryptoKey,
-        plaintext
-      );
-
-      return {
-        iv: bytesToBase64Url(iv),
-        data: bytesToBase64Url(new Uint8Array(encrypted))
-      };
-    }
-
-    async function decryptMessage(packet) {
-      const plaintext = await crypto.subtle.decrypt(
-        {
-          name: "AES-GCM",
-          iv: base64UrlToBytes(packet.iv),
-          additionalData: new TextEncoder().encode(currentRoom)
-        },
-        cryptoKey,
-        base64UrlToBytes(packet.data)
-      );
-
-      return JSON.parse(new TextDecoder().decode(plaintext));
-    }
-
-    function showMessage(name, text, time) {
+    function showMessage(name, text, time = new Date().toISOString()) {
       const item = document.createElement("li");
       const meta = document.createElement("div");
       const body = document.createElement("div");
@@ -230,36 +210,82 @@
       messages.scrollTop = messages.scrollHeight;
     }
 
-    document.querySelector("#generate-key").addEventListener("click", () => {
-      const bytes = crypto.getRandomValues(new Uint8Array(32));
-      roomKeyInput.value = Array.from(bytes, byte =>
-        byte.toString(16).padStart(2, "0")
-      ).join("");
-      joinStatus.textContent = "Key generated. Copy it and share it privately with room members.";
-    });
-
-    document.querySelector("#copy-key").addEventListener("click", async () => {
-      if (!roomKeyInput.value) {
-        joinStatus.textContent = "Generate a key first.";
+    async function handlePeerPublicKey(publicKeyText) {
+      if (typeof publicKeyText !== "string" || publicKeyText.length > 300) {
+        status.textContent = "Received an invalid public key.";
         return;
       }
 
+      if (publicKeyText === ownPublicKeyText) return;
+
+      peerPublicKeyText = publicKeyText;
+
       try {
-        await navigator.clipboard.writeText(roomKeyInput.value);
-        joinStatus.textContent = "Key copied. Share it privately—not in the room chat.";
-      } catch {
-        roomKeyInput.select();
-        joinStatus.textContent = "Key selected. Use your device’s Copy command.";
+        const peerPublicKey = await crypto.subtle.importKey(
+          "raw",
+          base64UrlToBytes(peerPublicKeyText),
+          { name: "ECDH", namedCurve: "P-256" },
+          false,
+          []
+        );
+
+        const secretBits = await crypto.subtle.deriveBits(
+          { name: "ECDH", public: peerPublicKey },
+          privateKey,
+          256
+        );
+
+        const hkdfKey = await crypto.subtle.importKey(
+          "raw",
+          secretBits,
+          "HKDF",
+          false,
+          ["deriveKey"]
+        );
+
+        sessionKey = await crypto.subtle.deriveKey(
+          {
+            name: "HKDF",
+            hash: "SHA-256",
+            salt: new TextEncoder().encode(room),
+            info: new TextEncoder().encode("Cairn demo v1")
+          },
+          hkdfKey,
+          { name: "AES-GCM", length: 256 },
+          false,
+          ["encrypt", "decrypt"]
+        );
+
+        const publicKeys = [ownPublicKeyText, peerPublicKeyText].sort();
+        const fingerprintText = `${room}|${publicKeys[0]}|${publicKeys[1]}`;
+        const fingerprintDigest = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(fingerprintText)
+        );
+
+        const code = Array.from(new Uint8Array(fingerprintDigest).slice(0, 8))
+          .map(byte => byte.toString(16).padStart(2, "0"))
+          .join("")
+          .toUpperCase();
+
+        verification.textContent = code;
+        verificationArea.hidden = false;
+        status.textContent =
+          "Compare the code with the other person. Sending stays disabled until you confirm the codes match.";
+        updateSendControls();
+      } catch (error) {
+        sessionKey = null;
+        status.textContent = "Key exchange failed. Refresh and try again.";
+        console.error(error);
       }
-    });
+    }
 
     document.querySelector("#join-button").addEventListener("click", async () => {
-      const name = document.querySelector("#name").value.trim().slice(0, 24);
-      const room = document.querySelector("#room").value.trim().toLowerCase();
-
+      displayName = document.querySelector("#name").value.trim().slice(0, 24);
+      room = document.querySelector("#room").value.trim().toLowerCase();
       joinStatus.textContent = "";
 
-      if (!name) {
+      if (!displayName) {
         joinStatus.textContent = "Enter a display name.";
         return;
       }
@@ -270,74 +296,146 @@
         return;
       }
 
-      try {
-        if (!crypto.subtle) {
-          throw new Error("Browser encryption is unavailable. Open the Render site using HTTPS.");
-        }
+      if (!window.crypto || !crypto.subtle) {
+        joinStatus.textContent =
+          "Browser encryption is unavailable. Open the Render site using HTTPS.";
+        return;
+      }
 
-        cryptoKey = await importRoomKey(roomKeyInput.value.trim());
-        currentRoom = room;
-        currentName = name;
+      if (typeof io !== "function") {
+        joinStatus.textContent =
+          "Could not load the chat connection library. Check the server and refresh.";
+        return;
+      }
+
+      try {
+        const keyPair = await crypto.subtle.generateKey(
+          { name: "ECDH", namedCurve: "P-256" },
+          true,
+          ["deriveBits"]
+        );
+
+        privateKey = keyPair.privateKey;
+        const publicKeyBytes = await crypto.subtle.exportKey("raw", keyPair.publicKey);
+        ownPublicKeyText = bytesToBase64Url(new Uint8Array(publicKeyBytes));
+
+        joinPanel.hidden = true;
+        chat.hidden = false;
+        status.textContent = "Joining room…";
 
         if (!socket.connected) {
-          throw new Error("Not connected to the server. Refresh and try again.");
+          status.textContent = "Connecting to the server…";
+          socket.connect();
         }
 
         socket.emit("join-room", { room });
-        joinPanel.hidden = true;
-        chat.hidden = false;
-        status.textContent = `Encrypted room: ${room}`;
-        messageInput.focus();
+        socket.emit("public-key", ownPublicKeyText);
       } catch (error) {
-        joinStatus.textContent = error.message;
+        joinPanel.hidden = false;
+        chat.hidden = true;
+        joinStatus.textContent = "Could not create encryption keys. Refresh and try again.";
+        console.error(error);
       }
+    });
+
+    verifiedCheckbox.addEventListener("change", () => {
+      updateSendControls();
+      if (verifiedCheckbox.checked) {
+        status.textContent = "Code confirmed. You can send encrypted messages.";
+      }
+    });
+
+    socket.on("peer-public-key", handlePeerPublicKey);
+
+    socket.on("room-error", message => {
+      joinPanel.hidden = false;
+      chat.hidden = true;
+      joinStatus.textContent = message;
+    });
+
+    socket.on("connect_error", () => {
+      status.textContent = "Could not connect to the server. Refresh and try again.";
     });
 
     socket.on("disconnect", () => {
+      sessionKey = null;
+      verifiedCheckbox.checked = false;
+      updateSendControls();
+
       if (!chat.hidden) {
-        status.textContent = "Disconnected. Refresh the page to reconnect.";
-      }
-    });
-
-    socket.on("room-history", async history => {
-      messages.replaceChildren();
-
-      for (const packet of history) {
-        try {
-          const message = await decryptMessage(packet);
-          showMessage(message.name, message.text, packet.time);
-        } catch {
-          status.textContent =
-            "Could not decrypt a message. Check that everyone uses the same key.";
-        }
-      }
-    });
-
-    socket.on("message", async packet => {
-      try {
-        const message = await decryptMessage(packet);
-        showMessage(message.name, message.text, packet.time);
-      } catch {
         status.textContent =
-          "Could not decrypt a message. Check that everyone uses the same key.";
+          "Disconnected. Refresh and rejoin to start a new session.";
       }
+    });
+
+    socket.on("peer-left", () => {
+      sessionKey = null;
+      peerPublicKeyText = "";
+      verifiedCheckbox.checked = false;
+      verificationArea.hidden = true;
+      updateSendControls();
+      status.textContent =
+        "The other person left. Refresh and rejoin to start a new session.";
     });
 
     document.querySelector("#send-form").addEventListener("submit", async event => {
       event.preventDefault();
 
+      if (!sessionKey || !verifiedCheckbox.checked) {
+        status.textContent = "Compare and confirm the verification code first.";
+        return;
+      }
+
       const text = messageInput.value.trim();
       if (!text) return;
 
       try {
-        const packet = await encryptMessage({ name: currentName, text });
-        socket.emit("send-message", packet);
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const plaintext = new TextEncoder().encode(
+          JSON.stringify({ name: displayName, text })
+        );
+
+        const ciphertext = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv },
+          sessionKey,
+          plaintext
+        );
+
+        socket.emit("send-message", {
+          iv: bytesToBase64Url(iv),
+          data: bytesToBase64Url(new Uint8Array(ciphertext))
+        });
+
+        showMessage("You", text);
         messageInput.value = "";
         messageInput.focus();
-      } catch {
-        status.textContent = "Could not encrypt the message. Refresh and try again.";
+      } catch (error) {
+        status.textContent = "Could not encrypt the message.";
+        console.error(error);
+      }
+    });
+
+    socket.on("message", async packet => {
+      if (!sessionKey) return;
+
+      try {
+        const plaintext = await crypto.subtle.decrypt(
+          {
+            name: "AES-GCM",
+            iv: base64UrlToBytes(packet.iv)
+          },
+          sessionKey,
+          base64UrlToBytes(packet.data)
+        );
+
+        const message = JSON.parse(new TextDecoder().decode(plaintext));
+        showMessage(message.name, message.text, packet.time);
+      } catch (error) {
+        status.textContent = "Could not decrypt the message.";
+        console.error(error);
       }
     });
   </script>
 </body>
 </html>
+
