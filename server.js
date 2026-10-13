@@ -87,7 +87,7 @@ io.on("connection", socket => {
     if (
       !member ||
       typeof publicKey !== "string" ||
-      !/^[A-Za-z0-9_-]{86}$/.test(publicKey)
+      !/^[A-Za-z0-9_-]{87}$/(publicKey)
     ) {
       return;
     }
