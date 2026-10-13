@@ -58,6 +58,13 @@
     #send-form input { flex: 1; }
     #send-form button { width: auto; margin: 0; }
     .warning { font-size: 13px; color: #62685e; }
+    .key-buttons {
+  display: flex;
+  gap: 8px;
+}
+.key-buttons button {
+  flex: 1;
+}
   </style>
 </head>
 <body>
@@ -89,87 +96,213 @@
   </main>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script>
-    const socket = io();
-    const joinPanel = document.querySelector("#join-panel");
-    const chat = document.querySelector("#chat");
-    const status = document.querySelector("#status");
-    const messages = document.querySelector("#messages");
-    const joinButton = document.querySelector("#join-button");
-    const sendForm = document.querySelector("#send-form");
-    const messageInput = document.querySelector("#message-input");
+<script>
+  const socket = io();
 
-    let myName = "";
+  const joinPanel = document.querySelector("#join-panel");
+  const chat = document.querySelector("#chat");
+  const status = document.querySelector("#status");
+  const joinStatus = document.querySelector("#join-status");
+  const messages = document.querySelector("#messages");
+  const joinButton = document.querySelector("#join-button");
+  const sendForm = document.querySelector("#send-form");
+  const messageInput = document.querySelector("#message-input");
+  const roomKeyInput = document.querySelector("#room-key");
 
-    function addMessage(name, text, time) {
-      const item = document.createElement("li");
-      const meta = document.createElement("div");
-      const body = document.createElement("div");
+  let cryptoKey;
+  let currentRoom;
 
-      meta.className = "meta";
-      meta.textContent = `${name} · ${new Date(time).toLocaleTimeString()}`;
-      body.textContent = text;
+  function bytesToBase64Url(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary)
+      .replace(/\\+/g, "-")
+      .replace(/\\//g, "\_")
+      .replace(/=+\$/g, "");
+  }
 
-      item.append(meta, body);
-      messages.appendChild(item);
-      messages.scrollTop = messages.scrollHeight;
+  function base64UrlToBytes(value) {
+    const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - base64.length % 4) % 4);
+    return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+  }
+
+  function keyFromHex(hex) {
+    if (!/^[0-9a-fA-F]{64}\$/.test(hex)) {
+      throw new Error("The key must be exactly 64 hexadecimal characters.");
     }
 
-    joinButton.addEventListener("click", () => {
-      myName = document.querySelector("#name").value.trim();
-      const room = document.querySelector("#room").value.trim().toLowerCase();
+    const rawKey = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) {
+      rawKey[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
 
-if (!myName || !/^[a-z0-9-]{3,40}$/.test(room)) {
-  alert("Enter your name and a room code using 3–40 lowercase letters, numbers, or hyphens.");
-  return;
-}
+    return crypto.subtle.importKey(
+      "raw",
+      rawKey,
+      { name: "AES-GCM" },
+      false,
+      ["encrypt", "decrypt"]
+    );
+  }
 
+  async function encryptMessage(value) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(JSON.stringify(value));
 
-      joinButton.disabled = true;
-      status.textContent = "Connecting…";
+    const ciphertext = await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv,
+        additionalData: new TextEncoder().encode(currentRoom)
+      },
+      cryptoKey,
+      plaintext
+    );
 
-      socket.emit("join-room", { room, name: myName });
+    return {
+      iv: bytesToBase64Url(iv),
+      data: bytesToBase64Url(new Uint8Array(ciphertext))
+    };
+  }
+
+  async function decryptMessage(packet) {
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: base64UrlToBytes(packet.iv),
+        additionalData: new TextEncoder().encode(currentRoom)
+      },
+      cryptoKey,
+      base64UrlToBytes(packet.data)
+    );
+
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  }
+
+  function showMessage(name, text, time) {
+    const item = document.createElement("li");
+    const meta = document.createElement("div");
+    const body = document.createElement("div");
+
+    meta.className = "meta";
+    meta.textContent = `${name} · ${new Date(time).toLocaleTimeString()}`;
+    body.textContent = text;
+
+    item.append(meta, body);
+    messages.appendChild(item);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  document.querySelector("#generate-key").addEventListener("click", () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    roomKeyInput.value = Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("");
+    joinStatus.textContent = "New key generated. Share it privately with room members.";
+  });
+
+  document.querySelector("#copy-key").addEventListener("click", async () => {
+    if (!roomKeyInput.value) {
+      joinStatus.textContent = "Generate a key first.";
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(roomKeyInput.value);
+      joinStatus.textContent = "Key copied. Share it privately—not in the room chat.";
+    } catch {
+      roomKeyInput.select();
+      joinStatus.textContent = "Key selected. Use Copy from your device’s text menu.";
+    }
+  });
+
+  joinButton.addEventListener("click", async () => {
+    const name = document.querySelector("#name").value.trim().slice(0, 24);
+    const room = document.querySelector("#room").value.trim().toLowerCase();
+    const keyText = roomKeyInput.value.trim();
+
+    if (!name) {
+      joinStatus.textContent = "Enter a display name.";
+      return;
+    }
+
+    if (!/^[a-z0-9-]{3,40}\$/.test(room)) {
+      joinStatus.textContent = "Room code must use 3–40 lowercase letters, numbers, or hyphens.";
+      return;
+    }
+
+    try {
+      if (!window.crypto || !crypto.subtle) {
+        throw new Error("Secure browser encryption is unavailable. Open the Render site using HTTPS.");
+      }
+
+      cryptoKey = await keyFromHex(keyText);
+      currentRoom = room;
+
+      if (!socket.connected) {
+        throw new Error("Not connected to the chat server. Refresh the page and try again.");
+      }
+
+      socket.emit("join-room", { room });
       joinPanel.hidden = true;
       chat.hidden = false;
-      status.textContent = `Room: ${room}`;
+      status.textContent = `Encrypted room: ${room}`;
       messageInput.focus();
-    });
+    } catch (error) {
+      joinStatus.textContent = error.message;
+    }
+  });
 
-    socket.on("connect", () => {
-      joinButton.disabled = false;
-    });
+  socket.on("connect", () => {
+    if (!chat.hidden) status.textContent = `Encrypted room: ${currentRoom}`;
+  });
 
-    socket.on("disconnect", () => {
-      status.textContent = "Disconnected. Refresh the page to reconnect.";
-    });
+  socket.on("disconnect", () => {
+    if (!chat.hidden) status.textContent = "Disconnected. Refresh the page to reconnect.";
+  });
 
-    socket.on("room-history", (history) => {
-      messages.replaceChildren();
-      history.forEach((message) =>
-        addMessage(message.name, message.text, message.time)
-      );
-    });
+  socket.on("room-history", async (history) => {
+    messages.replaceChildren();
 
-    socket.on("message", (message) => {
-      addMessage(message.name, message.text, message.time);
-    });
+    for (const packet of history) {
+      try {
+        const message = await decryptMessage(packet);
+        showMessage(message.name, message.text, packet.time);
+      } catch {
+        status.textContent = "Could not decrypt a message. Check that everyone is using the same key.";
+      }
+    }
+  });
 
-    socket.on("notice", (text) => {
-      const item = document.createElement("li");
-      item.className = "meta";
-      item.textContent = text;
-      messages.appendChild(item);
-    });
+  socket.on("message", async (packet) => {
+    try {
+      const message = await decryptMessage(packet);
+      showMessage(message.name, message.text, packet.time);
+    } catch {
+      status.textContent = "Could not decrypt a message. Check that everyone is using the same key.";
+    }
+  });
 
-    sendForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const text = messageInput.value.trim();
-      if (!text) return;
+  sendForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
 
-      socket.emit("send-message", text);
+    const text = messageInput.value.trim();
+    if (!text) return;
+
+    try {
+      const packet = await encryptMessage({
+        name: document.querySelector("#name").value.trim().slice(0, 24),
+        text
+      });
+
+      socket.emit("send-message", packet);
       messageInput.value = "";
       messageInput.focus();
-    });
+    } catch {
+      status.textContent = "Message encryption failed. Refresh and try again.";
+    }
+  });
   </script>
 </body>
 </html>
