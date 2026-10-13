@@ -8,6 +8,8 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
+
+// Each room maps socket IDs to that person's submitted public key.
 const rooms = new Map();
 
 app.use(express.static(path.join(__dirname, "public")));
@@ -20,9 +22,9 @@ function leaveRoom(socket) {
   const roomName = socket.data.room;
   if (!roomName) return;
 
-  const members = rooms.get(roomName);
   socket.data.room = null;
 
+  const members = rooms.get(roomName);
   if (!members) return;
 
   members.delete(socket.id);
@@ -38,19 +40,14 @@ function leaveRoom(socket) {
 }
 
 io.on("connection", socket => {
-  socket.on("join-room", ({ room } = {}) => {
+  socket.on("join-room", payload => {
     if (socket.data.room) {
       socket.emit("room-error", "Refresh to start a new session.");
       return;
     }
 
-    if (typeof room !== "string") {
-      socket.emit("room-error", "Invalid room code.");
-      return;
-    }
-
-    room = room.trim().toLowerCase();
-    if (!/^[a-z0-9-]{3,40}$/.test(room)) {
+    const room = payload && payload.room;
+    if (typeof room !== "string" || !/^[a-z0-9-]{3,40}$/.test(room)) {
       socket.emit("room-error", "Room code must be 3–40 lowercase letters, numbers, or hyphens.");
       return;
     }
@@ -69,9 +66,11 @@ io.on("connection", socket => {
     members.set(socket.id, { publicKey: null });
     socket.data.room = room;
     socket.join(room);
+
     socket.emit("joined-room");
 
-    // If the existing peer already submitted a key, send it to the newcomer.
+    // If the other person already submitted their public key, send it to the
+    // newly joined person. Otherwise, it will be sent when that person submits.
     for (const [id, member] of members) {
       if (id !== socket.id && member.publicKey) {
         socket.emit("peer-public-key", member.publicKey);
@@ -84,6 +83,7 @@ io.on("connection", socket => {
     const members = roomName && rooms.get(roomName);
     const member = members && members.get(socket.id);
 
+    // A raw uncompressed P-256 public key is 65 bytes, or 87 base64url chars.
     if (
       !member ||
       typeof publicKey !== "string" ||
@@ -93,9 +93,6 @@ io.on("connection", socket => {
     }
 
     member.publicKey = publicKey;
-
-    // Notify only the other member. The new joiner receives an existing key
-    // above, or receives this event when the other person submits theirs.
     socket.to(roomName).emit("peer-public-key", publicKey);
   });
 
@@ -127,9 +124,11 @@ io.on("connection", socket => {
     }
   });
 
-  socket.on("disconnect", () => leaveRoom(socket));
+  socket.on("disconnect", () => {
+    leaveRoom(socket);
+  });
 });
-  
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Cairn is running on port ${PORT}`);
