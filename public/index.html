@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cairn — Private Messages</title>
+  <title>Cairn — Encrypted Chat Demo</title>
   <style>
     * { box-sizing: border-box; }
 
@@ -23,7 +23,7 @@
       flex-direction: column;
     }
 
-    h1 { margin: 0; letter-spacing: -0.04em; }
+    h1 { margin: 0; letter-spacing: -.04em; }
     .subtitle { margin: 4px 0 20px; color: #62685e; }
 
     .panel, #chat {
@@ -69,12 +69,6 @@
 
     #join-status { color: #9b3e31; }
     #chat { flex: 1; margin-top: 16px; min-height: 300px; }
-    #verification {
-      padding: 12px;
-      background: #f2f3ee;
-      border-radius: 10px;
-      overflow-wrap: anywhere;
-    }
 
     #messages {
       height: min(45vh, 400px);
@@ -89,39 +83,36 @@
     #send-form { display: flex; gap: 8px; }
     #send-form input { flex: 1; min-width: 0; }
     #send-form button { width: auto; margin: 0; }
-
-    .verify-check {
-      display: flex;
-      align-items: flex-start;
-      gap: 10px;
-      margin: 12px 0;
-      font-weight: 400;
-    }
-
-    .verify-check input {
-      width: auto;
-      margin-top: 4px;
-    }
   </style>
 </head>
 <body>
   <main>
     <h1>Cairn</h1>
-    <p class="subtitle">A two-person encrypted chat demo.</p>
+    <p class="subtitle">An educational two-person encrypted chat demo.</p>
 
     <section class="panel" id="join-panel">
       <label for="name">Your display name</label>
-      <input id="name" maxlength="24" placeholder="e.g. Alex"
-             autocomplete="nickname">
+      <input
+        id="name"
+        maxlength="24"
+        placeholder="e.g. Alex"
+        autocomplete="nickname"
+      >
 
       <label for="room">Room code</label>
-      <input id="room" maxlength="40" placeholder="e.g. weekend-chat"
-             autocomplete="off" autocapitalize="none" spellcheck="false">
+      <input
+        id="room"
+        maxlength="40"
+        placeholder="e.g. weekend-chat"
+        autocomplete="off"
+        autocapitalize="none"
+        spellcheck="false"
+      >
 
       <p class="note">
-        Both people enter the same room code. There is no shared encryption key
-        to type in. After joining, compare the verification code using a separate
-        trusted channel, such as a phone call.
+        Both people enter the same room code. Messages are encrypted in the
+        browser before the server relays them. This demo does not authenticate
+        public keys, so the server could substitute keys.
       </p>
 
       <p id="join-status" aria-live="polite"></p>
@@ -131,20 +122,17 @@
     <section id="chat" hidden>
       <p id="status" aria-live="polite">Connecting…</p>
 
-      <div id="verification-area" hidden>
-        <p><strong>Compare this code with the other person:</strong></p>
-        <p id="verification" aria-live="polite"></p>
-        <label class="verify-check">
-          <input id="verified" type="checkbox">
-          <span>We compared the codes over a separate trusted channel, and they match.</span>
-        </label>
-      </div>
-
       <ul id="messages" aria-live="polite"></ul>
 
       <form id="send-form">
-        <input id="message-input" maxlength="1000" placeholder="Write a message"
-               autocomplete="off" aria-label="Message" disabled>
+        <input
+          id="message-input"
+          maxlength="1000"
+          placeholder="Write a message"
+          autocomplete="off"
+          aria-label="Message"
+          disabled
+        >
         <button id="send-button" type="submit" disabled>Send</button>
       </form>
     </section>
@@ -156,11 +144,9 @@
 
     const joinPanel = document.querySelector("#join-panel");
     const joinStatus = document.querySelector("#join-status");
+    const joinButton = document.querySelector("#join-button");
     const chat = document.querySelector("#chat");
     const status = document.querySelector("#status");
-    const verificationArea = document.querySelector("#verification-area");
-    const verification = document.querySelector("#verification");
-    const verifiedCheckbox = document.querySelector("#verified");
     const messages = document.querySelector("#messages");
     const messageInput = document.querySelector("#message-input");
     const sendButton = document.querySelector("#send-button");
@@ -169,8 +155,9 @@
     let displayName = "";
     let privateKey = null;
     let ownPublicKeyText = "";
-    let peerPublicKeyText = "";
     let sessionKey = null;
+    let joined = false;
+    let sessionToken = 0;
 
     function bytesToBase64Url(bytes) {
       let binary = "";
@@ -191,7 +178,7 @@
     }
 
     function updateSendControls() {
-      const canSend = Boolean(sessionKey && verifiedCheckbox.checked);
+      const canSend = Boolean(sessionKey && joined);
       messageInput.disabled = !canSend;
       sendButton.disabled = !canSend;
     }
@@ -210,15 +197,18 @@
       messages.scrollTop = messages.scrollHeight;
     }
 
-    async function handlePeerPublicKey(publicKeyText) {
-      if (typeof publicKeyText !== "string" || publicKeyText.length > 300) {
+    async function handlePeerPublicKey(peerPublicKeyText) {
+      const token = sessionToken;
+
+      if (
+        !joined ||
+        typeof peerPublicKeyText !== "string" ||
+        !/^[A-Za-z0-9_-]{86}$/.test(peerPublicKeyText) ||
+        peerPublicKeyText === ownPublicKeyText
+      ) {
         status.textContent = "Received an invalid public key.";
         return;
       }
-
-      if (publicKeyText === ownPublicKeyText) return;
-
-      peerPublicKeyText = publicKeyText;
 
       try {
         const peerPublicKey = await crypto.subtle.importKey(
@@ -229,7 +219,7 @@
           []
         );
 
-        const secretBits = await crypto.subtle.deriveBits(
+        const sharedBits = await crypto.subtle.deriveBits(
           { name: "ECDH", public: peerPublicKey },
           privateKey,
           256
@@ -237,18 +227,18 @@
 
         const hkdfKey = await crypto.subtle.importKey(
           "raw",
-          secretBits,
+          sharedBits,
           "HKDF",
           false,
           ["deriveKey"]
         );
 
-        sessionKey = await crypto.subtle.deriveKey(
+        const derivedKey = await crypto.subtle.deriveKey(
           {
             name: "HKDF",
             hash: "SHA-256",
             salt: new TextEncoder().encode(room),
-            info: new TextEncoder().encode("Cairn demo v1")
+            info: new TextEncoder().encode("Cairn educational demo v1")
           },
           hkdfKey,
           { name: "AES-GCM", length: 256 },
@@ -256,31 +246,23 @@
           ["encrypt", "decrypt"]
         );
 
-        const publicKeys = [ownPublicKeyText, peerPublicKeyText].sort();
-        const fingerprintText = `${room}|${publicKeys[0]}|${publicKeys[1]}`;
-        const fingerprintDigest = await crypto.subtle.digest(
-          "SHA-256",
-          new TextEncoder().encode(fingerprintText)
-        );
+        // Ignore a key-exchange result if the user disconnected or left
+        // while the asynchronous crypto operations were running.
+        if (token !== sessionToken || !joined) return;
 
-        const code = Array.from(new Uint8Array(fingerprintDigest).slice(0, 8))
-          .map(byte => byte.toString(16).padStart(2, "0"))
-          .join("")
-          .toUpperCase();
-
-        verification.textContent = code;
-        verificationArea.hidden = false;
-        status.textContent =
-          "Compare the code with the other person. Sending stays disabled until you confirm the codes match.";
+        sessionKey = derivedKey;
+        status.textContent = "Encrypted connection ready. You can send messages.";
         updateSendControls();
       } catch (error) {
+        if (token !== sessionToken) return;
         sessionKey = null;
+        updateSendControls();
         status.textContent = "Key exchange failed. Refresh and try again.";
         console.error(error);
       }
     }
 
-    document.querySelector("#join-button").addEventListener("click", async () => {
+    joinButton.addEventListener("click", async () => {
       displayName = document.querySelector("#name").value.trim().slice(0, 24);
       room = document.querySelector("#room").value.trim().toLowerCase();
       joinStatus.textContent = "";
@@ -297,8 +279,7 @@
       }
 
       if (!window.crypto || !crypto.subtle) {
-        joinStatus.textContent =
-          "Browser encryption is unavailable. Open the Render site using HTTPS.";
+        joinStatus.textContent = "Browser encryption requires HTTPS.";
         return;
       }
 
@@ -308,46 +289,66 @@
         return;
       }
 
+      joinButton.disabled = true;
+
       try {
         const keyPair = await crypto.subtle.generateKey(
           { name: "ECDH", namedCurve: "P-256" },
-          true,
+          false,
           ["deriveBits"]
         );
 
         privateKey = keyPair.privateKey;
-        const publicKeyBytes = await crypto.subtle.exportKey("raw", keyPair.publicKey);
+        const publicKeyBytes = await crypto.subtle.exportKey(
+          "raw",
+          keyPair.publicKey
+        );
         ownPublicKeyText = bytesToBase64Url(new Uint8Array(publicKeyBytes));
+
+        sessionToken++;
+        joined = false;
+        sessionKey = null;
+        updateSendControls();
+        messages.replaceChildren();
 
         joinPanel.hidden = true;
         chat.hidden = false;
         status.textContent = "Joining room…";
 
         if (!socket.connected) {
-          status.textContent = "Connecting to the server…";
           socket.connect();
         }
 
         socket.emit("join-room", { room });
-        socket.emit("public-key", ownPublicKeyText);
       } catch (error) {
         joinPanel.hidden = false;
         chat.hidden = true;
-        joinStatus.textContent = "Could not create encryption keys. Refresh and try again.";
+        joinStatus.textContent =
+          "Could not create encryption keys. Refresh and try again.";
         console.error(error);
+      } finally {
+        joinButton.disabled = false;
       }
     });
 
-    verifiedCheckbox.addEventListener("change", () => {
+    socket.on("joined-room", () => {
+      if (joined) return;
+
+      joined = true;
+      socket.emit("public-key", ownPublicKeyText);
+      status.textContent = "Joined. Waiting for the other person…";
       updateSendControls();
-      if (verifiedCheckbox.checked) {
-        status.textContent = "Code confirmed. You can send encrypted messages.";
-      }
     });
 
     socket.on("peer-public-key", handlePeerPublicKey);
 
     socket.on("room-error", message => {
+      joined = false;
+      sessionToken++;
+      sessionKey = null;
+      privateKey = null;
+      updateSendControls();
+
       joinPanel.hidden = false;
       chat.hidden = true;
       joinStatus.textContent = message;
@@ -358,8 +359,10 @@
     });
 
     socket.on("disconnect", () => {
+      joined = false;
+      sessionToken++;
       sessionKey = null;
-      verifiedCheckbox.checked = false;
+      privateKey = null;
       updateSendControls();
 
       if (!chat.hidden) {
@@ -369,11 +372,12 @@
     });
 
     socket.on("peer-left", () => {
+      joined = false;
+      sessionToken++;
       sessionKey = null;
-      peerPublicKeyText = "";
-      verifiedCheckbox.checked = false;
-      verificationArea.hidden = true;
+      privateKey = null;
       updateSendControls();
+
       status.textContent =
         "The other person left. Refresh and rejoin to start a new session.";
     });
@@ -381,8 +385,8 @@
     document.querySelector("#send-form").addEventListener("submit", async event => {
       event.preventDefault();
 
-      if (!sessionKey || !verifiedCheckbox.checked) {
-        status.textContent = "Compare and confirm the verification code first.";
+      if (!sessionKey || !joined) {
+        status.textContent = "Wait for the encrypted connection to be ready.";
         return;
       }
 
@@ -416,7 +420,8 @@
     });
 
     socket.on("message", async packet => {
-      if (!sessionKey) return;
+      const key = sessionKey;
+      if (!key || !packet) return;
 
       try {
         const plaintext = await crypto.subtle.decrypt(
@@ -424,11 +429,20 @@
             name: "AES-GCM",
             iv: base64UrlToBytes(packet.iv)
           },
-          sessionKey,
+          key,
           base64UrlToBytes(packet.data)
         );
 
         const message = JSON.parse(new TextDecoder().decode(plaintext));
+
+        if (
+          !message ||
+          typeof message.name !== "string" ||
+          typeof message.text !== "string"
+        ) {
+          throw new Error("Invalid message contents");
+        }
+
         showMessage(message.name, message.text, packet.time);
       } catch (error) {
         status.textContent = "Could not decrypt the message.";
@@ -438,4 +452,3 @@
   </script>
 </body>
 </html>
-
