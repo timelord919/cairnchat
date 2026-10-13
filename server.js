@@ -11,6 +11,23 @@ const messagesByRoom = new Map();
 
 app.use(express.static("public"));
 
+app.get("/", (req, res) => {
+  const fs = require("fs");
+  const path = require("path");
+  const candidates = [
+    path.join(__dirname, "public", "index.html"),
+    path.join(__dirname, "index.html"),
+    path.join(__dirname, "public.html")
+  ];
+  const homepage = candidates.find(fs.existsSync);
+
+  if (homepage) {
+    res.sendFile(homepage);
+  } else {
+    res.status(404).send("Homepage not found. Add public/index.html to the GitHub repository.");
+  }
+});
+
 io.on("connection", (socket) => {
   socket.on("join-room", ({ room, name } = {}) => {
     if (typeof room !== "string" || typeof name !== "string") return;
