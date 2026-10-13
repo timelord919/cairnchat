@@ -7,9 +7,6 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const PORT = process.env.PORT || 3000;
-const messagesByRoom = new Map();
-
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/", (req, res) => {
@@ -21,23 +18,38 @@ io.on("connection", (socket) => {
     if (typeof room !== "string") return;
 
     room = room.trim().toLowerCase();
-
     if (!/^[a-z0-9-]{3,40}$/.test(room)) return;
 
-    for (const oldRoom of socket.rooms) {
-      if (oldRoom !== socket.id) {
-        socket.leave(oldRoom);
-      }
+    const members = io.sockets.adapter.rooms.get(room);
+    if (members && members.size >= 2) {
+      socket.emit("room-error", "This prototype allows only two people per room.");
+      return;
     }
 
     socket.join(room);
     socket.data.room = room;
-    socket.emit("room-history", messagesByRoom.get(room) || []);
+
+    // Tell the new user about the existing peer's public key, if available.
+    if (members) {
+      for (const id of members) {
+        const peer = io.sockets.sockets.get(id);
+        if (peer?.data.publicKey) {
+          socket.emit("peer-public-key", peer.data.publicKey);
+        }
+      }
+    }
+  });
+
+  socket.on("public-key", (publicKey) => {
+    const room = socket.data.room;
+    if (!room || typeof publicKey !== "string" || publicKey.length > 300) return;
+
+    socket.data.publicKey = publicKey;
+    socket.to(room).emit("peer-public-key", publicKey);
   });
 
   socket.on("send-message", (packet) => {
     const room = socket.data.room;
-
     if (
       !room ||
       !packet ||
@@ -50,24 +62,17 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const message = {
-      iv: packet.iv,
-      data: packet.data,
-      time: new Date().toISOString()
-    };
+    // Relay ciphertext only; do not keep message history.
+    socket.to(room).emit("message", packet);
+  });
 
-    const history = messagesByRoom.get(room) || [];
-    history.push(message);
-
-    if (history.length > 100) {
-      history.shift();
-    }
-
-    messagesByRoom.set(room, history);
-    io.to(room).emit("message", message);
+  socket.on("disconnect", () => {
+    const room = socket.data.room;
+    if (room) socket.to(room).emit("peer-left");
   });
 });
 
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Cairn is running on port ${PORT}`);
 });
