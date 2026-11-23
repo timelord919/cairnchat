@@ -49,3 +49,7 @@ The server relays message packets but does not itself encrypt or decrypt their c
 ## License
 
 Cairn is licensed under the GNU General Public License v3.0. See LICENSE [blocked] for the full license text.
+
+## Credits
+
+Created and maintained solo by timelord919.
