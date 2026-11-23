@@ -21,15 +21,15 @@ git clone <repository-url>
 cd <repository-directory>
 npm install
 npm start
-
+```
 Set the start script in package.json to run your server file, for example:
-
+```
 {
   "scripts": {
     "start": "node server.js"
   }
 }
-
+```
 Then open http://localhost:3000. The server uses the PORT environment variable when set, and otherwise listens on port 3000.
 
 ## Room and message constraints
