@@ -48,7 +48,7 @@ The server relays message packets but does not itself encrypt or decrypt their c
 
 ## License
 
-Cairn is licensed under the GNU General Public License v3.0. See LICENSE [blocked] for the full license text.
+This project is licensed under the GNU General Public License v3.0 only. See [`LICENSE`](LICENSE) for the full license text.
 
 ## Credits
 
